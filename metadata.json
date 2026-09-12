@@ -1,0 +1,12 @@
+{
+  "name": "AI Smart Vision Assistant",
+  "description": "A voice-first, AI-powered accessibility vision assistant for visually impaired users with real-time detection, OCR, obstacle alerts, emergency SOS, and multilingual support.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
