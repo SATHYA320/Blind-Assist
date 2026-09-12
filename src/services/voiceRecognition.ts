@@ -25,6 +25,7 @@ export interface VoiceCommandMatch {
     | 'flashlight_off'
     | 'change_language'
     | 'enroll_voice'
+    | 'live_conversation'
     | 'general_question';
   targetContact?: string;
   targetObject?: string;
@@ -572,7 +573,27 @@ export class VoiceRecognitionService {
       };
     }
 
-    // 12. Language change commands
+    // 12. Live Voice Conversation (Gemini Live API)
+    if (
+      text.includes('live conversation') ||
+      text.includes('live api') ||
+      text.includes('live voice') ||
+      text.includes('talk live') ||
+      text.includes('start live') ||
+      text.includes('have a conversation') ||
+      text.includes('voice conversation') ||
+      text.includes('real time conversation')
+    ) {
+      return {
+        type: 'live_conversation',
+        rawTranscript: rawClean,
+        commandText,
+        hasWakeWord,
+        detectedLanguage: detectedLang,
+      };
+    }
+
+    // 13. Language change commands
     if (text.includes('tamil') || text.includes('தமிழ்')) {
       return {
         type: 'change_language',

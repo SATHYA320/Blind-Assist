@@ -1,5 +1,5 @@
 import React from 'react';
-import { Mic, MicOff, Volume2, Globe, Sparkles, Key, CheckCircle, AlertCircle, ShieldCheck } from 'lucide-react';
+import { Mic, MicOff, Volume2, Globe, Sparkles, Key, CheckCircle, AlertCircle, ShieldCheck, Radio } from 'lucide-react';
 import { SupportedLanguage, SUPPORTED_LANGUAGES } from '../types';
 
 interface VoiceStatusOverlayProps {
@@ -12,9 +12,11 @@ interface VoiceStatusOverlayProps {
   wakeWordDetected: boolean;
   isVoiceVerified: boolean;
   voiceAuthStatusText: string;
+  isLiveActive?: boolean;
   onLanguageChange: (lang: SupportedLanguage) => void;
   onToggleMic: () => void;
   onEnrollVoice: () => void;
+  onToggleLive?: () => void;
 }
 
 export const VoiceStatusOverlay: React.FC<VoiceStatusOverlayProps> = ({
@@ -27,9 +29,11 @@ export const VoiceStatusOverlay: React.FC<VoiceStatusOverlayProps> = ({
   wakeWordDetected,
   isVoiceVerified,
   voiceAuthStatusText,
+  isLiveActive = false,
   onLanguageChange,
   onToggleMic,
   onEnrollVoice,
+  onToggleLive,
 }) => {
   const currentLangObj = SUPPORTED_LANGUAGES.find((l) => l.code === activeLanguage);
 
@@ -158,13 +162,13 @@ export const VoiceStatusOverlay: React.FC<VoiceStatusOverlayProps> = ({
         </div>
       </div>
 
-      {/* Main Tactile Mic Action Button */}
-      <div className="flex items-center justify-between gap-4 pt-1">
+      {/* Main Tactile Mic Action Button & Live Mode Toggle */}
+      <div className="flex items-center justify-between gap-3 pt-1">
         <button
           id="main-voice-mic-btn"
           type="button"
           onClick={onToggleMic}
-          className={`flex-1 flex items-center justify-center gap-3 py-3.5 px-6 rounded-xl font-extrabold text-base transition-all active:scale-[0.98] shadow-lg focus:ring-4 focus:ring-amber-400 ${
+          className={`flex-1 flex items-center justify-center gap-3 py-3.5 px-5 rounded-xl font-extrabold text-base transition-all active:scale-[0.98] shadow-lg focus:ring-4 focus:ring-amber-400 ${
             isListening
               ? 'bg-emerald-500 text-neutral-950 hover:bg-emerald-400 shadow-[0_0_20px_rgba(16,185,129,0.4)]'
               : 'bg-neutral-800 text-neutral-100 hover:bg-neutral-700 border border-neutral-700'
@@ -177,16 +181,39 @@ export const VoiceStatusOverlay: React.FC<VoiceStatusOverlayProps> = ({
         >
           {isListening ? (
             <>
-              <Mic className="w-6 h-6 animate-pulse text-neutral-950" />
-              <span>Listening Active (Say “Aira ...”)</span>
+              <Mic className="w-5 h-5 animate-pulse text-neutral-950" />
+              <span className="truncate">Listening Active (“Aira”)</span>
             </>
           ) : (
             <>
-              <MicOff className="w-6 h-6 text-neutral-400" />
-              <span>Tap to Enable Voice Listening (“Aira”)</span>
+              <MicOff className="w-5 h-5 text-neutral-400" />
+              <span className="truncate">Enable Voice (“Aira”)</span>
             </>
           )}
         </button>
+
+        {onToggleLive && (
+          <button
+            id="gemini-live-conversation-btn"
+            type="button"
+            onClick={onToggleLive}
+            className={`flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl font-bold text-sm transition-all active:scale-[0.98] border ${
+              isLiveActive
+                ? 'bg-cyan-500 text-neutral-950 border-cyan-400 shadow-[0_0_20px_rgba(6,182,212,0.5)] animate-pulse'
+                : 'bg-neutral-950 text-cyan-400 border-cyan-800/80 hover:bg-neutral-800'
+            }`}
+            aria-label={
+              isLiveActive
+                ? 'Gemini Live Conversation is active with gemini-3.1-flash-live-preview. Click to stop live voice session.'
+                : 'Start real-time voice conversation with Gemini Live API (gemini-3.1-flash-live-preview).'
+            }
+          >
+            <Radio className={`w-4 h-4 ${isLiveActive ? 'animate-spin text-neutral-950' : 'text-cyan-400'}`} />
+            <span className="whitespace-nowrap">
+              {isLiveActive ? 'Live Audio ON' : 'Live API Voice'}
+            </span>
+          </button>
+        )}
       </div>
     </div>
   );

@@ -1,12 +1,15 @@
 import express from "express";
 import path from "path";
+import http from "http";
 import dotenv from "dotenv";
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Modality, LiveServerMessage } from "@google/genai";
+import { WebSocketServer, WebSocket } from "ws";
 
 dotenv.config();
 
 const app = express();
 const PORT = 3000;
+const server = http.createServer(app);
 
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
@@ -19,6 +22,149 @@ const ai = new GoogleGenAI({
       "User-Agent": "aistudio-build",
     },
   },
+});
+
+// Setup Live API WebSocket Server on path "/api/live"
+const wss = new WebSocketServer({ noServer: true });
+
+server.on("upgrade", (request, socket, head) => {
+  const pathname = request.url ? new URL(request.url, `http://${request.headers.host}`).pathname : "";
+  if (pathname === "/api/live") {
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit("connection", ws, request);
+    });
+  }
+});
+
+wss.on("connection", async (clientWs: WebSocket) => {
+  console.log("Client connected to Gemini Live API WebSocket session");
+  let liveSession: any = null;
+  let isClosed = false;
+
+  const safeSend = (payload: any) => {
+    if (clientWs.readyState === WebSocket.OPEN && !isClosed) {
+      clientWs.send(JSON.stringify(payload));
+    }
+  };
+
+  try {
+    // Connect to gemini-3.1-flash-live-preview
+    liveSession = await ai.live.connect({
+      model: "gemini-3.1-flash-live-preview",
+      config: {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: { voiceName: "Zephyr" },
+          },
+        },
+        systemInstruction:
+          "You are Aira, a caring, real-time AI smart vision assistant for visually impaired and blind individuals. Answer questions conversationally, concisely, clearly and warmly. When describing objects, surroundings, or answering questions, be direct, natural, and helpful for orientation and safety.",
+      },
+      callbacks: {
+        onmessage: (message: LiveServerMessage) => {
+          if (isClosed) return;
+          try {
+            // Audio turn data (PCM 24kHz)
+            const audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            if (audio) {
+              safeSend({ type: "audio", audio });
+            }
+
+            // User audio interrupted (user started speaking again)
+            if (message.serverContent?.interrupted) {
+              safeSend({ type: "interrupted" });
+            }
+
+            // Turn complete
+            if (message.serverContent?.turnComplete) {
+              safeSend({ type: "turnComplete" });
+            }
+          } catch (e: any) {
+            console.warn("Live API onmessage error:", e?.message);
+          }
+        },
+        onclose: () => {
+          console.log("Live API session closed by server");
+          safeSend({ type: "status", status: "session_closed" });
+        },
+        onerror: (err: any) => {
+          console.warn("Live API session error:", err?.message || err);
+          safeSend({
+            type: "error",
+            error: err?.message || "Live voice session encountered a temporary issue",
+          });
+        },
+      },
+    });
+
+    safeSend({ type: "status", status: "connected", model: "gemini-3.1-flash-live-preview" });
+
+    clientWs.on("message", (raw: any) => {
+      if (isClosed || !liveSession) return;
+      try {
+        const data = JSON.parse(raw.toString());
+
+        // Audio chunk from microphone: PCM 16kHz Little-Endian Base64
+        if (data.type === "audio" && data.audio) {
+          liveSession.sendRealtimeInput({
+            audio: {
+              data: data.audio,
+              mimeType: "audio/pcm;rate=16000",
+            },
+          });
+        } else if (data.audio) {
+          liveSession.sendRealtimeInput({
+            audio: {
+              data: data.audio,
+              mimeType: "audio/pcm;rate=16000",
+            },
+          });
+        }
+
+        // Realtime camera video frame: JPEG image base64
+        if (data.type === "video" && data.video) {
+          liveSession.sendRealtimeInput({
+            video: {
+              data: data.video,
+              mimeType: "image/jpeg",
+            },
+          });
+        }
+
+        // Direct text question to Live session
+        if (data.type === "text" && data.text) {
+          liveSession.sendRealtimeInput({
+            text: data.text,
+          });
+        }
+      } catch (err: any) {
+        console.warn("Client message processing error:", err?.message);
+      }
+    });
+
+    clientWs.on("close", () => {
+      isClosed = true;
+      try {
+        liveSession?.close?.();
+      } catch (e) {}
+    });
+
+    clientWs.on("error", (err) => {
+      console.warn("WebSocket client error:", err.message);
+      isClosed = true;
+      try {
+        liveSession?.close?.();
+      } catch (e) {}
+    });
+  } catch (err: any) {
+    console.error("Failed to establish Live API connection:", err?.message || err);
+    safeSend({
+      type: "error",
+      error: err?.message || "Failed to connect to Live API",
+    });
+    clientWs.close();
+  }
 });
 
 // Health check
@@ -401,7 +547,7 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  server.listen(PORT, "0.0.0.0", () => {
     console.log(`AI Smart Vision Assistant server running on port ${PORT}`);
   });
 }

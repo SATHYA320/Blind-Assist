@@ -9,6 +9,7 @@ import {
   Upload,
   AlertOctagon,
   RefreshCw,
+  Sparkles,
 } from 'lucide-react';
 import { AssistantMode } from '../types';
 
@@ -21,6 +22,8 @@ interface AccessibleControlsProps {
   isAnalyzing: boolean;
   autoLoopActive: boolean;
   onToggleAutoLoop: () => void;
+  isLiveActive?: boolean;
+  onToggleLive?: () => void;
 }
 
 export const AccessibleControls: React.FC<AccessibleControlsProps> = ({
@@ -32,6 +35,8 @@ export const AccessibleControls: React.FC<AccessibleControlsProps> = ({
   isAnalyzing,
   autoLoopActive,
   onToggleAutoLoop,
+  isLiveActive = false,
+  onToggleLive,
 }) => {
   return (
     <div
@@ -40,6 +45,57 @@ export const AccessibleControls: React.FC<AccessibleControlsProps> = ({
       role="group"
       aria-label="Vision Assistant Feature Controls"
     >
+      {/* Ask Questions & Live Voice Conversation Banner (gemini-3.1-flash-live-preview) */}
+      {onToggleLive && (
+        <button
+          id="btn-live-conversation-card"
+          type="button"
+          onClick={onToggleLive}
+          className={`w-full p-4 rounded-2xl border-2 transition-all flex items-center justify-between gap-3 shadow-lg active:scale-[0.99] text-left ${
+            isLiveActive
+              ? 'bg-gradient-to-r from-cyan-950 via-neutral-900 to-cyan-950 border-cyan-400 shadow-[0_0_25px_rgba(6,182,212,0.3)]'
+              : 'bg-neutral-900/90 border-cyan-700/60 hover:border-cyan-500'
+          }`}
+          aria-label={
+            isLiveActive
+              ? 'Live voice conversation active with Gemini Live API. Click to disconnect.'
+              : 'Start live conversational voice Q and A with Gemini Live API.'
+          }
+        >
+          <div className="flex items-center gap-3.5">
+            <div className={`p-3 rounded-xl ${isLiveActive ? 'bg-cyan-500 text-neutral-950 animate-pulse' : 'bg-cyan-950 text-cyan-400 border border-cyan-700/50'}`}>
+              <Sparkles className="w-6 h-6" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-extrabold text-base sm:text-lg text-neutral-100">
+                  Ask Questions & Live Conversation
+                </span>
+                <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border ${
+                  isLiveActive
+                    ? 'bg-cyan-400 text-neutral-950 border-cyan-300 animate-pulse'
+                    : 'bg-cyan-950 text-cyan-300 border-cyan-700/70'
+                }`}>
+                  {isLiveActive ? 'Live Audio Connected' : 'gemini-3.1-flash-live-preview'}
+                </span>
+              </div>
+              <p className="text-xs text-neutral-300 mt-0.5">
+                {isLiveActive
+                  ? 'Real-time conversational audio active. Speak any question naturally.'
+                  : 'Tap to start real-time back-and-forth voice Q&A powered by Gemini Live API.'}
+              </p>
+            </div>
+          </div>
+          <div className={`px-3 py-1.5 rounded-xl font-bold text-xs whitespace-nowrap border ${
+            isLiveActive
+              ? 'bg-cyan-400 text-neutral-950 border-cyan-300'
+              : 'bg-neutral-800 text-cyan-300 border-neutral-700'
+          }`}>
+            {isLiveActive ? 'Stop Live' : 'Start Live Q&A'}
+          </div>
+        </button>
+      )}
+
       {/* Primary High-Impact Row: SOS & What Do You See */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {/* EMERGENCY SOS BUTTON (Highest Contrast Red) */}

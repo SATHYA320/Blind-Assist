@@ -39,6 +39,7 @@ import { voiceRecognition, VoiceCommandMatch } from './services/voiceRecognition
 import { deviceSensors, LocationData } from './services/deviceSensors';
 import { audioHaptics } from './services/audioHaptics';
 import { voiceAuthService } from './services/voiceAuth';
+import { liveVoiceService } from './services/liveVoiceConversation';
 import { Shield, Eye, Info, Volume2 } from 'lucide-react';
 
 const STORAGE_KEY_CONTACTS = 'ai_vision_contacts';
@@ -74,6 +75,7 @@ export default function App() {
   const [wakeWordDetected, setWakeWordDetected] = useState(false);
   const [isVoiceVerified, setIsVoiceVerified] = useState(true);
   const [voiceAuthStatusText, setVoiceAuthStatusText] = useState('Voice Verified');
+  const [isLiveActive, setIsLiveActive] = useState(false);
 
   // Device & Sensor State
   const [isLowLight, setIsLowLight] = useState(false);
@@ -483,6 +485,25 @@ export default function App() {
     }
   }, [speakAssistant]);
 
+  // Toggle Live API Conversation (gemini-3.1-flash-live-preview)
+  const handleToggleLive = useCallback(async () => {
+    if (isLiveActive) {
+      liveVoiceService.stopLiveSession();
+      setIsLiveActive(false);
+      speakAssistant('Live voice conversation closed.', 'normal', true, activeLanguage);
+    } else {
+      // Pause standard keyword recognition while Live API full-duplex session is active
+      if (isListening) {
+        voiceRecognition.stop();
+      }
+      speakAssistant('Starting Gemini Live real-time audio session...', 'normal', true, activeLanguage);
+      const ok = await liveVoiceService.startLiveSession();
+      if (ok) {
+        setIsLiveActive(true);
+      }
+    }
+  }, [isLiveActive, isListening, speakAssistant, activeLanguage]);
+
   // 7. Voice Command Dispatcher with Speaker Verification & Dynamic Language Alignment
   const handleVoiceCommand = useCallback(
     async (cmd: VoiceCommandMatch) => {
@@ -629,6 +650,10 @@ export default function App() {
           }
           break;
 
+        case 'live_conversation':
+          handleToggleLive();
+          break;
+
         case 'general_question':
         default:
           analyzeCurrentFrame('qa', cmd.rawTranscript, queryLang);
@@ -643,6 +668,7 @@ export default function App() {
       analyzeCurrentFrame,
       speakAssistant,
       activeLanguage,
+      handleToggleLive,
     ]
   );
 
@@ -668,6 +694,48 @@ export default function App() {
       audioHaptics.playListeningStart();
     }
   };
+
+  // Setup callbacks and video feeding for Live Voice Conversation (gemini-3.1-flash-live-preview)
+  useEffect(() => {
+    liveVoiceService.setCallbacks(
+      (status, details) => {
+        if (status === 'connected') {
+          setIsLiveActive(true);
+          setLastSpokenText('Connected to Gemini Live API. You can speak naturally.');
+        } else if (status === 'disconnected') {
+          setIsLiveActive(false);
+        } else if (status === 'error') {
+          setIsLiveActive(false);
+          setLastSpokenText(details || 'Live conversation ended.');
+        }
+      },
+      (speaking) => {
+        setIsSpeaking(speaking);
+      }
+    );
+
+    return () => {
+      liveVoiceService.stopLiveSession();
+    };
+  }, []);
+
+  // Periodic video snapshot sent to Live API session (1 FPS) while active
+  useEffect(() => {
+    if (!isLiveActive || !isCameraActive) return;
+
+    const interval = setInterval(() => {
+      try {
+        if (videoRef.current) {
+          const frameData = deviceSensors.captureFrame(videoRef.current, 640);
+          if (frameData) {
+            liveVoiceService.sendVideoFrame(frameData);
+          }
+        }
+      } catch (e) {}
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [isLiveActive, isCameraActive]);
 
   // Upload image analyzer pipeline
   const handleAnalyzeUploadedImage = async (
@@ -771,6 +839,7 @@ export default function App() {
           wakeWordDetected={wakeWordDetected}
           isVoiceVerified={isVoiceVerified}
           voiceAuthStatusText={voiceAuthStatusText}
+          isLiveActive={isLiveActive}
           onLanguageChange={(lang) => {
             setActiveLanguage(lang);
             const l = SUPPORTED_LANGUAGES.find((item) => item.code === lang);
@@ -778,6 +847,7 @@ export default function App() {
           }}
           onToggleMic={handleToggleMic}
           onEnrollVoice={handleEnrollVoice}
+          onToggleLive={handleToggleLive}
         />
 
         {/* 3. Accessible Touch Controls & Feature Triggers */}
@@ -789,6 +859,8 @@ export default function App() {
           onOpenNavigation={() => setIsNavModalOpen(true)}
           isAnalyzing={isAnalyzing}
           autoLoopActive={autoLoopActive}
+          isLiveActive={isLiveActive}
+          onToggleLive={handleToggleLive}
           onToggleAutoLoop={() => {
             const next = !autoLoopActive;
             setAutoLoopActive(next);
