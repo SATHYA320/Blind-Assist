@@ -28,9 +28,9 @@ export function detectSpokenLanguage(text: string): SupportedLanguage {
   // 2. Romanized keywords / Common phrases in native Indian languages
   const lower = clean.toLowerCase();
 
-  // Tamil Romanized markers
+  // Tamil / Tanglish Romanized markers (e.g. "Idhu enna?", "Enna object idhu?", "What object idhu?", "Indha bag enna color?")
   if (
-    /\b(vanakkam|kann|enge|padikkavum|yenna|enna|paaru|kaapathu|kaappathu|idhu|adhu|yaar|irukku|panam|roobai|marunthu)\b/i.test(
+    /\b(vanakkam|kann|enge|padikkavum|yenna|enna|paaru|kaapathu|kaappathu|idhu|adhu|yaar|irukku|panam|roobai|marunthu|indha|andha|color|colour|enna\s+object|object\s+idhu|enna\s+color|enna\s+colour|idhu\s+enna)\b/i.test(
       lower
     )
   ) {
