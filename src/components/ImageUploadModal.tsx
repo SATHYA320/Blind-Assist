@@ -42,12 +42,23 @@ export const ImageUploadModal: React.FC<ImageUploadModalProps> = ({
       setAnalyzing(true);
       try {
         const analysis = await onAnalyzeImage(base64Data, 'upload');
+        if (analysis?.isSensitive) {
+          // Strictly stop processing: do not display preview or description, respond only "An error occurred."
+          setPreviewUrl(null);
+          setResult(null);
+          setError('An error occurred.');
+          onSpeakText('An error occurred.', activeLanguage);
+          return;
+        }
         setResult(analysis);
         if (analysis?.speech) {
           onSpeakText(analysis.speech, activeLanguage);
         }
       } catch (err: any) {
-        setError(err.message || 'Failed to analyze uploaded image.');
+        setPreviewUrl(null);
+        setResult(null);
+        setError('An error occurred.');
+        onSpeakText('An error occurred.', activeLanguage);
       } finally {
         setAnalyzing(false);
       }

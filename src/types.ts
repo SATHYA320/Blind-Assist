@@ -84,6 +84,7 @@ export interface VisionAnalysisResult {
   recognizedFaces?: RecognizedPerson[];
   answer?: string;
   isSensitive?: boolean;
+  isTemporaryUnavailable?: boolean;
   error?: string;
   timestamp: number;
 }

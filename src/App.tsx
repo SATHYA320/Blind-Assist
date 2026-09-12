@@ -38,6 +38,7 @@ import { speechService } from './services/speechSynthesis';
 import { voiceRecognition, VoiceCommandMatch } from './services/voiceRecognition';
 import { deviceSensors, LocationData } from './services/deviceSensors';
 import { audioHaptics } from './services/audioHaptics';
+import { voiceAuthService } from './services/voiceAuth';
 import { Shield, Eye, Info, Volume2 } from 'lucide-react';
 
 const STORAGE_KEY_CONTACTS = 'ai_vision_contacts';
@@ -70,6 +71,9 @@ export default function App() {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [lastSpokenText, setLastSpokenText] = useState('');
+  const [wakeWordDetected, setWakeWordDetected] = useState(false);
+  const [isVoiceVerified, setIsVoiceVerified] = useState(true);
+  const [voiceAuthStatusText, setVoiceAuthStatusText] = useState('Voice Verified');
 
   // Device & Sensor State
   const [isLowLight, setIsLowLight] = useState(false);
@@ -108,8 +112,11 @@ export default function App() {
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [isNavModalOpen, setIsNavModalOpen] = useState(false);
 
-  // Deduplication tracker
+  // Deduplication & concurrency trackers
   const lastAnnouncedSummaryRef = useRef<string>('');
+  const isStartingCameraRef = useRef(false);
+  const isMountedRef = useRef(true);
+  const busyCooldownUntilRef = useRef<number>(0);
 
   // 1. Initial Setup: Camera Auto-Startup & Voice Initialization
   useEffect(() => {
@@ -157,14 +164,39 @@ export default function App() {
     });
   }, [activeLanguage]);
 
-  // Initialize Speech Recognition listeners
+  // Helper to vocalize text
+  const speakAssistant = useCallback(
+    async (
+      text: string,
+      priority: 'high' | 'normal' | 'low' = 'normal',
+      force = false,
+      targetLang?: SupportedLanguage
+    ) => {
+      const langToUse = targetLang || activeLanguage;
+      setLastSpokenText(text);
+      await speechService.speak(text, langToUse, priority, force);
+    },
+    [activeLanguage]
+  );
+
+  // Initialize Speech Recognition & Voice Auth listeners
   useEffect(() => {
+    // Warm up voice authentication engine
+    voiceAuthService.initAudioEngine().catch((e) => console.warn('Voice auth engine:', e));
+
     voiceRecognition.onStateChange((listening) => {
       setIsListening(listening);
     });
 
-    voiceRecognition.onTranscript((text, isFinal) => {
+    voiceRecognition.onTranscript((text, _isFinal, hasWake) => {
       setTranscript(text);
+      if (hasWake) {
+        setWakeWordDetected(true);
+      }
+    });
+
+    voiceRecognition.onWakeWord((detected) => {
+      setWakeWordDetected(detected);
     });
 
     voiceRecognition.onCommand((cmd) => {
@@ -183,44 +215,65 @@ export default function App() {
     };
   }, [activeLanguage, contacts, registeredFaces]);
 
-  // Helper to vocalize text
-  const speakAssistant = useCallback(
-    async (text: string, priority: 'high' | 'normal' | 'low' = 'normal', force = false) => {
-      setLastSpokenText(text);
-      await speechService.speak(text, activeLanguage, priority, force);
-    },
-    [activeLanguage]
-  );
-
   // 2. Start Camera Automatically on App Mount
   const startCameraAuto = useCallback(async () => {
-    if (!videoRef.current) return;
+    if (!videoRef.current || isStartingCameraRef.current) return;
+    if (deviceSensors.isCameraRunning()) {
+      setIsCameraActive(true);
+      return;
+    }
+
+    isStartingCameraRef.current = true;
     setCameraError(null);
     try {
       await deviceSensors.startCamera(videoRef.current);
+      if (!isMountedRef.current) {
+        deviceSensors.stopCamera();
+        return;
+      }
       setIsCameraActive(true);
       audioHaptics.playSuccess();
-      speakAssistant(
-        'Camera started. AI Smart Vision Assistant is active and listening.',
-        'normal',
-        true
-      );
+      if (deviceSensors.isUsingSyntheticStream()) {
+        setCameraError('Hardware camera is in use by another tab or system application. Standby video mode active. Tap "Start Camera Now" after closing other camera apps.');
+        speakAssistant(
+          'Hardware camera is currently busy in another tab. Standby vision mode active. Voice controls are listening.',
+          'normal',
+          true
+        );
+      } else {
+        speakAssistant(
+          'Camera started. AI Smart Vision Assistant is active and listening.',
+          'normal',
+          true
+        );
+      }
     } catch (err: any) {
-      console.error('Camera startup failed:', err);
-      setCameraError(
-        'Camera permission was denied or camera is unavailable. Click Start Camera or check browser settings.'
-      );
+      console.warn('Camera startup note:', err);
+      const isDeviceInUse =
+        err?.name === 'NotReadableError' ||
+        err?.name === 'TrackStartError' ||
+        /in use|busy|exclusive|concurrent/i.test(err?.message || '');
+      const userMessage = isDeviceInUse
+        ? 'Camera is currently in use by another application or browser tab. Please close other camera tabs and tap "Start Camera Now".'
+        : 'Camera permission was denied or camera is unavailable. Click Start Camera to retry.';
+      setCameraError(userMessage);
       speakAssistant(
-        'Camera is unavailable. Please grant camera permission.',
+        isDeviceInUse
+          ? 'Camera device is in use by another tab. Please close other camera tabs.'
+          : 'Camera is unavailable. Please grant camera permission.',
         'high',
         true
       );
+    } finally {
+      isStartingCameraRef.current = false;
     }
   }, [speakAssistant]);
 
   useEffect(() => {
+    isMountedRef.current = true;
     startCameraAuto();
     return () => {
+      isMountedRef.current = false;
       deviceSensors.stopCamera();
     };
   }, [startCameraAuto]);
@@ -235,9 +288,14 @@ export default function App() {
 
   // 3. Multimodal Analysis Core Engine
   const analyzeCurrentFrame = useCallback(
-    async (mode: AssistantMode = 'auto', customQuestion?: string) => {
+    async (
+      mode: AssistantMode = 'auto',
+      customQuestion?: string,
+      targetLanguage?: SupportedLanguage
+    ) => {
       if (!videoRef.current || isAnalyzing) return null;
 
+      const langToUse = targetLanguage || activeLanguage;
       const frameBase64 = deviceSensors.captureFrame(videoRef.current);
       if (!frameBase64) return null;
 
@@ -250,7 +308,7 @@ export default function App() {
             image: frameBase64,
             mode,
             question: customQuestion,
-            language: activeLanguage,
+            language: langToUse,
             registeredFaces: registeredFaces.map((f) => ({
               name: f.name,
               relationship: f.relationship,
@@ -260,17 +318,30 @@ export default function App() {
         });
 
         if (!response.ok) {
-          throw new Error(`Server returned ${response.status}`);
+          console.warn(`Frame analysis API responded with status ${response.status}`);
+          busyCooldownUntilRef.current = Date.now() + 6000;
+          return null;
         }
 
         const data: VisionAnalysisResult = await response.json();
         setLastAnalysis(data);
 
-        // Content Safety Filter Triggered
+        // Content Safety Filter Triggered:
+        // "If a restricted/nude image is detected, the system must immediately stop processing the image and respond only: 'An error occurred.'"
         if (data.isSensitive) {
-          speakAssistant(data.speech || 'Error occurred. Unable to process this image.', 'high', true);
           setDetectedObjects([]);
           setObstacles([]);
+          setRouteGuidance('');
+          speakAssistant('An error occurred.', 'high', true, langToUse);
+          return data;
+        }
+
+        // Temporary AI model high-demand backoff
+        if (data.isTemporaryUnavailable) {
+          busyCooldownUntilRef.current = Date.now() + 8000;
+          if (customQuestion || mode !== 'auto') {
+            speakAssistant(data.speech || 'Vision service is momentarily busy.', 'normal', true, langToUse);
+          }
           return data;
         }
 
@@ -283,7 +354,7 @@ export default function App() {
         if (data.obstacles && data.obstacles.length > 0) {
           setObstacles(data.obstacles);
           audioHaptics.playObstacleWarning();
-          speakAssistant(data.speech, 'high', true);
+          speakAssistant(data.speech, 'high', true, langToUse);
         } else {
           setObstacles([]);
           if (data.routeGuidance) {
@@ -293,17 +364,21 @@ export default function App() {
           // Vocalize response if direct question or significant change
           if (customQuestion || mode !== 'auto') {
             audioHaptics.playDetectionPing();
-            speakAssistant(data.speech, 'normal', true);
+            speakAssistant(data.speech, 'normal', true, langToUse);
           } else if (data.speech && data.speech !== lastAnnouncedSummaryRef.current) {
             lastAnnouncedSummaryRef.current = data.speech;
             audioHaptics.playDetectionPing();
-            speakAssistant(data.speech, 'normal', false);
+            speakAssistant(data.speech, 'normal', false, langToUse);
           }
         }
 
         return data;
       } catch (err: any) {
-        console.error('Frame analysis failed:', err);
+        console.warn('Frame analysis cycle issue:', err?.message || err);
+        // Do not crash loop; back off quietly for routine frames
+        if (customQuestion || mode !== 'auto') {
+          speakAssistant('An error occurred.', 'high', true, langToUse);
+        }
       } finally {
         setIsAnalyzing(false);
       }
@@ -312,16 +387,16 @@ export default function App() {
     [isAnalyzing, activeLanguage, registeredFaces, speakAssistant]
   );
 
-  // 4. Auto Surveillance Loop (~3.5 seconds interval)
+  // 4. Auto Surveillance Loop (~6.5 seconds interval for quota efficiency and low battery consumption)
   useEffect(() => {
     if (!isCameraActive || !autoLoopActive) return;
 
     const interval = setInterval(() => {
-      // Only run if not currently speaking or analyzing
-      if (!isAnalyzing && !isSpeaking) {
+      // Only run if not currently speaking or analyzing, and after any temporary cooldown
+      if (!isAnalyzing && !isSpeaking && Date.now() > busyCooldownUntilRef.current) {
         analyzeCurrentFrame('auto');
       }
-    }, 3500);
+    }, 6500);
 
     return () => clearInterval(interval);
   }, [isCameraActive, autoLoopActive, isAnalyzing, isSpeaking, analyzeCurrentFrame]);
@@ -391,10 +466,51 @@ export default function App() {
     [contacts, speakAssistant]
   );
 
-  // 7. Voice Command Dispatcher
+  // Voice enrollment calibration helper
+  const handleEnrollVoice = useCallback(async () => {
+    try {
+      speakAssistant('Please speak now to record your authorized voice signature.', 'high', true);
+      const enrolled = await voiceAuthService.enrollVoice('Authorized User');
+      if (enrolled) {
+        setIsVoiceVerified(true);
+        setVoiceAuthStatusText('Voice Verified (Active)');
+        audioHaptics.playSuccess();
+        speakAssistant('Authorized voice signature calibrated successfully.', 'high', true);
+      }
+    } catch (e: any) {
+      console.warn('Enrollment error:', e);
+      speakAssistant('Voice calibration failed. Microphone access is needed.', 'normal', true);
+    }
+  }, [speakAssistant]);
+
+  // 7. Voice Command Dispatcher with Speaker Verification & Dynamic Language Alignment
   const handleVoiceCommand = useCallback(
     async (cmd: VoiceCommandMatch) => {
       audioHaptics.playListeningStop();
+
+      // Enforce Authorized User Voice Identification when "Aira" wake-word is used
+      // (Emergency SOS commands are always permitted for immediate user safety)
+      if (cmd.type !== 'sos_trigger' && cmd.type !== 'sos_cancel') {
+        const verification = await voiceAuthService.verifySpeaker();
+        if (!verification.authorized) {
+          setIsVoiceVerified(false);
+          setVoiceAuthStatusText('Unauthorized Voice');
+          audioHaptics.playLowLightAlert();
+          speakAssistant(
+            'Voice not recognized. Only the authorized user can command Aira.',
+            'high',
+            true
+          );
+          return;
+        } else {
+          setIsVoiceVerified(true);
+          setVoiceAuthStatusText(`Authorized (${Math.round(verification.confidence * 100)}%)`);
+        }
+      }
+
+      // Determine Target Language from user speech:
+      // "The assistant must respond to the user’s questions in the same language the user speaks."
+      const queryLang = cmd.targetLanguage || activeLanguage;
 
       switch (cmd.type) {
         case 'sos_trigger':
@@ -418,44 +534,44 @@ export default function App() {
         case 'camera_close':
           deviceSensors.stopCamera();
           setIsCameraActive(false);
-          speakAssistant('Camera closed.', 'normal', true);
+          speakAssistant('Camera closed.', 'normal', true, queryLang);
           break;
 
         case 'upload_image':
           setIsUploadModalOpen(true);
-          speakAssistant('Opening image upload.', 'normal', true);
+          speakAssistant('Opening image upload.', 'normal', true, queryLang);
           break;
 
         case 'flashlight_on':
           deviceSensors.setTorch(true);
           setIsTorchOn(true);
-          speakAssistant('Flashlight turned on.', 'normal', true);
+          speakAssistant('Flashlight turned on.', 'normal', true, queryLang);
           break;
 
         case 'flashlight_off':
           deviceSensors.setTorch(false);
           setIsTorchOn(false);
-          speakAssistant('Flashlight turned off.', 'normal', true);
+          speakAssistant('Flashlight turned off.', 'normal', true, queryLang);
           break;
 
         case 'read_text':
-          speakAssistant('Reading visible text...', 'normal', true);
-          analyzeCurrentFrame('ocr', 'Read all visible text on signs, labels, packages, or books.');
+          speakAssistant('Reading visible text...', 'normal', true, queryLang);
+          analyzeCurrentFrame('ocr', 'Read all visible text on signs, labels, packages, or books.', queryLang);
           break;
 
         case 'detect_currency':
-          speakAssistant('Checking for currency banknotes...', 'normal', true);
-          analyzeCurrentFrame('currency', 'Identify currency notes and calculate the total amount in rupees.');
+          speakAssistant('Checking for currency banknotes...', 'normal', true, queryLang);
+          analyzeCurrentFrame('currency', 'Identify currency notes and calculate the total amount in rupees.', queryLang);
           break;
 
         case 'read_medicine':
-          speakAssistant('Checking medicine package...', 'normal', true);
-          analyzeCurrentFrame('medicine', 'Read the medicine name, active ingredients, and expiry date.');
+          speakAssistant('Checking medicine package...', 'normal', true, queryLang);
+          analyzeCurrentFrame('medicine', 'Read the medicine name, active ingredients, and expiry date.', queryLang);
           break;
 
         case 'recognize_face':
-          speakAssistant('Scanning for familiar people...', 'normal', true);
-          analyzeCurrentFrame('faces', 'Who is in front of me? Check against registered contacts.');
+          speakAssistant('Scanning for familiar people...', 'normal', true, queryLang);
+          analyzeCurrentFrame('faces', 'Who is in front of me? Check against registered contacts.', queryLang);
           break;
 
         case 'open_navigation':
@@ -467,36 +583,37 @@ export default function App() {
               speakAssistant(
                 `Your current location has been detected at ${loc.addressSummary}. Route guidance is active.`,
                 'normal',
-                true
+                true,
+                queryLang
               );
             })
             .catch(() => {
-              speakAssistant('Location is currently unavailable. Please enable GPS.', 'normal', true);
+              speakAssistant('Location is currently unavailable. Please enable GPS.', 'normal', true, queryLang);
             });
           break;
 
         case 'what_see':
-          analyzeCurrentFrame('auto', 'What do you see in front of me and around me?');
+          analyzeCurrentFrame('auto', 'What do you see in front of me and around me?', queryLang);
           break;
 
         case 'what_front':
-          analyzeCurrentFrame('objects', 'What is directly in front of me?');
+          analyzeCurrentFrame('objects', 'What is directly in front of me?', queryLang);
           break;
 
         case 'what_left':
-          analyzeCurrentFrame('objects', 'What is on my left side?');
+          analyzeCurrentFrame('objects', 'What is on my left side?', queryLang);
           break;
 
         case 'what_right':
-          analyzeCurrentFrame('objects', 'What is on my right side?');
+          analyzeCurrentFrame('objects', 'What is on my right side?', queryLang);
           break;
 
         case 'distance_query':
-          analyzeCurrentFrame('objects', cmd.rawTranscript);
+          analyzeCurrentFrame('objects', cmd.rawTranscript, queryLang);
           break;
 
         case 'detect_object':
-          analyzeCurrentFrame('objects', 'Detect and list all recognizable objects in the surroundings.');
+          analyzeCurrentFrame('objects', 'Detect and list all recognizable objects in the surroundings.', queryLang);
           break;
 
         case 'change_language':
@@ -506,14 +623,15 @@ export default function App() {
             speakAssistant(
               `Language changed to ${langObj?.nativeName || cmd.targetLanguage}.`,
               'normal',
-              true
+              true,
+              cmd.targetLanguage
             );
           }
           break;
 
         case 'general_question':
         default:
-          analyzeCurrentFrame('qa', cmd.rawTranscript);
+          analyzeCurrentFrame('qa', cmd.rawTranscript, queryLang);
           break;
       }
     },
@@ -524,6 +642,7 @@ export default function App() {
       startCameraAuto,
       analyzeCurrentFrame,
       speakAssistant,
+      activeLanguage,
     ]
   );
 
@@ -649,12 +768,16 @@ export default function App() {
           transcript={transcript}
           lastSpokenText={lastSpokenText}
           activeLanguage={activeLanguage}
+          wakeWordDetected={wakeWordDetected}
+          isVoiceVerified={isVoiceVerified}
+          voiceAuthStatusText={voiceAuthStatusText}
           onLanguageChange={(lang) => {
             setActiveLanguage(lang);
             const l = SUPPORTED_LANGUAGES.find((item) => item.code === lang);
-            speakAssistant(`Language switched to ${l?.nativeName || lang}.`, 'normal', true);
+            speakAssistant(`Language switched to ${l?.nativeName || lang}.`, 'normal', true, lang);
           }}
           onToggleMic={handleToggleMic}
+          onEnrollVoice={handleEnrollVoice}
         />
 
         {/* 3. Accessible Touch Controls & Feature Triggers */}

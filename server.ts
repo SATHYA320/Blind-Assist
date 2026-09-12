@@ -30,6 +30,66 @@ app.get("/api/health", (_req, res) => {
   });
 });
 
+// Resilient Gemini generateContent with smart model fallback across distinct quota pools
+// Track cooldown per model when hitting 429 quota exhaustion to prevent repeated failed calls
+const modelExhaustedUntil: Record<string, number> = {};
+
+async function generateContentWithRetryAndFallback(params: {
+  contents: any;
+  config?: any;
+}): Promise<any> {
+  // Ordered by speed, responsiveness, and quota distribution:
+  // 1. gemini-3.1-flash-lite (high free RPM / independent quota)
+  // 2. gemini-flash-latest (general flash tier)
+  // 3. gemini-3.8-flash (standard high-reasoning flash)
+  const candidateModels = ["gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-3.8-flash"];
+  let lastError: any = null;
+  const now = Date.now();
+
+  for (let modelIndex = 0; modelIndex < candidateModels.length; modelIndex++) {
+    const currentModel = candidateModels[modelIndex];
+
+    // If model is currently rate-limited or quota-exhausted, skip to next model immediately
+    if (modelExhaustedUntil[currentModel] && now < modelExhaustedUntil[currentModel]) {
+      continue;
+    }
+
+    try {
+      const response = await ai.models.generateContent({
+        model: currentModel,
+        contents: params.contents,
+        config: params.config,
+      });
+      return response;
+    } catch (err: any) {
+      lastError = err;
+      const errMsg = err?.message || String(err);
+      const errStatus = err?.status || err?.error?.code;
+      const isQuotaOrDemand =
+        errStatus === 429 ||
+        errStatus === 503 ||
+        /429|503|RESOURCE_EXHAUSTED|quota|rate limit|UNAVAILABLE/i.test(errMsg);
+
+      console.warn(
+        `Gemini model "${currentModel}" issue (status: ${errStatus || "unknown"}):`,
+        errMsg
+      );
+
+      if (isQuotaOrDemand) {
+        // Parse retry-after from error message if available, e.g. "retry in 45.5s" or default to 30s
+        let cooldownSec = 20;
+        const retryMatch = errMsg.match(/retry in\s+([\d.]+)\s*s/i);
+        if (retryMatch) {
+          cooldownSec = Math.ceil(parseFloat(retryMatch[1])) + 1;
+        }
+        modelExhaustedUntil[currentModel] = Date.now() + cooldownSec * 1000;
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 // Language map helper for prompt guidance
 const LANGUAGE_NAMES: Record<string, string> = {
   en: "English",
@@ -38,6 +98,15 @@ const LANGUAGE_NAMES: Record<string, string> = {
   te: "Telugu (తెలుగు)",
   kn: "Kannada (ಕನ್ನಡ)",
   hi: "Hindi (हिन्दी)",
+};
+
+const BUSY_MESSAGES: Record<string, string> = {
+  en: "The vision service is temporarily busy. Checking your surroundings again shortly.",
+  ta: "பார்வை சேவை தற்போது பிஸியாக உள்ளது. விரைவில் மீண்டும் சரிபார்க்கிறது.",
+  hi: "दृष्टि सेवा अभी व्यस्त है। जल्द ही पुनः जाँच कर रहे हैं।",
+  ml: "വിഷൻ സേവനം ഇപ്പോൾ തിരക്കിലാണ്. ഉടൻ വീണ്ടും പരിശോധിക്കുന്നു.",
+  te: "విజన్ సర్వీస్ ప్రస్తుతం బిజీగా ఉంది. కొద్దిసేపట్లో మళ్లీ తనిఖీ చేస్తోంది.",
+  kn: "ದೃಷ್ಟಿ ಸೇವೆ ಪ್ರಸ್ತುತ ಕಾರ್ಯನಿರತವಾಗಿದೆ. ಶೀಘ್ರದಲ್ಲೇ ಮತ್ತೆ ಪರಿಶೀಲಿಸಲಾಗುವುದು.",
 };
 
 interface AnalyzeRequest {
@@ -84,15 +153,16 @@ app.post("/api/analyze-frame", async (req, res) => {
     const targetLangName = LANGUAGE_NAMES[language] || "English";
 
     // System prompt engineered strictly to satisfy all guidelines:
-    // 1. Content safety (nude/sensitive detection aborts immediately)
-    // 2. Object detection with name, confidence, color, direction/position, distance in meters
-    // 3. Unknown object breakdown (shape, size, structure, texture, material)
-    // 4. Obstacle alerts and route guidance
-    // 5. OCR text extraction
-    // 6. Registered face matching (only announce registered names, never name unknown people)
-    // 7. Currency recognition (especially Indian Rupee ₹500, ₹200, ₹100, etc., and calculating sum)
-    // 8. Medicine detection (brand/generic name, expiry date, disclaimer)
-    // 9. Multilingual output: the `speech` and `answer` fields MUST be in the requested language
+    // 1. Content safety: if a restricted/nude image is detected, immediately stop processing and respond only "An error occurred."
+    //    Do not describe, identify, analyze, or process the restricted image.
+    // 2. Language mandate: The assistant must respond to the user's questions in the same language the user speaks.
+    // 3. Object detection with name, confidence, color, direction/position, distance in meters
+    // 4. Unknown object breakdown (shape, size, structure, texture, material)
+    // 5. Obstacle alerts and route guidance
+    // 6. OCR text extraction
+    // 7. Registered face matching (only announce registered names, never name unknown people)
+    // 8. Currency recognition (especially Indian Rupee ₹500, ₹200, ₹100, etc., and calculating sum)
+    // 9. Medicine detection (brand/generic name, expiry date, disclaimer)
     const registeredFacesDescription = registeredFaces.length > 0
       ? `Registered authorized people the user knows:\n${registeredFaces
           .map((f) => `- Name: "${f.name}", Relationship: "${f.relationship}", Notes: "${f.descriptionNotes || "known contact"}"`)
@@ -107,9 +177,23 @@ User Question / Command: ${question ? `"${question}"` : "None (Routine visual su
 Target Spoken Language: ${targetLangName} (code: ${language})
 ${registeredFacesDescription}
 
-SAFETY RULE (CRITICAL):
-First, check if the image contains explicit nudity or adult sexual content.
-If YES, you MUST set "isSensitive": true, and "speech": "Error occurred. Unable to process this image.", with all detection arrays empty. Do NOT describe or store the image.
+SAFETY & RESTRICTED IMAGE RULE (ABSOLUTE PRIORITY):
+If a restricted/nude or adult sexual image is detected:
+You MUST immediately stop processing the image and respond ONLY:
+"An error occurred."
+Do NOT describe, identify, analyze, or process the restricted image in any way.
+In this case, return JSON with "isSensitive": true, "speech": "An error occurred.", "answer": "An error occurred.", and all other lists/fields empty or null.
+
+LANGUAGE MATCHING MANDATE:
+The assistant must respond in the same language the user speaks: "${targetLangName}" (code: ${language}).
+The "speech" field, "answer" field, and "routeGuidance" field MUST be in "${targetLangName}".
+For example:
+- Tamil: Tamil script (e.g., "உங்கள் முன்னால்...")
+- Hindi: Hindi Devanagari script (e.g., "आपके सामने...")
+- Malayalam: Malayalam script (e.g., "നിങ്ങളുടെ മുന്നിൽ...")
+- Telugu: Telugu script (e.g., "మీ ముందు...")
+- Kannada: Kannada script (e.g., "ನಿಮ್ಮ ಮುಂದೆ...")
+- English: Natural conversational English
 
 ACCESSIBILITY & DETECTION RULES:
 1. OBJECT DETECTION: Detect visible objects (people, chairs, tables, bags, bottles, vehicles, doors, steps, walls, electronics, obstacles).
@@ -124,17 +208,16 @@ ACCESSIBILITY & DETECTION RULES:
 6. MEDICINE PACKAGES: If medicine strips, bottles, or boxes are seen, detect medicine name, visible expiry date, and label info. Do not provide medical diagnosis or dosage.
 7. FACE RECOGNITION: If a face matches the registered list, note their name and relationship. Never name unknown faces.
 8. NATURAL VOICE RESPONSE ("speech"):
-   - Formulate a natural, prioritized voice statement.
+   - Formulate a natural, prioritized voice statement in ${targetLangName}.
    - High Priority: Immediate obstacles ahead or safety risks first!
    - Medium: Key detected objects, people, or direct answers to user's question.
    - Low: Background details.
-   - LANGUAGE MANDATE: The "speech" field AND "answer" field MUST be written in the specified Target Spoken Language (${targetLangName}). For example, if Tamil, output natural spoken Tamil (e.g., "உங்கள் முன்னால் ஒரு நபர் இருக்கிறார்..."); if Hindi, output natural spoken Hindi (e.g., "आपके सामने एक व्यक्ति है..."); if Malayalam, Telugu, Kannada, or English, use that exact language!
 
 Return ONLY a valid JSON object matching this schema (no markdown fences, no raw text):
 {
   "isSensitive": false,
-  "sceneSummary": "Brief English or localized scene overview",
-  "speech": "Primary voice response spoken directly to the blind user in ${targetLangName}",
+  "sceneSummary": "Brief overview in ${targetLangName}",
+  "speech": "Primary voice response spoken directly to the user in ${targetLangName}",
   "answer": "Direct answer to user question if provided, in ${targetLangName}",
   "detectedLanguage": "${language}",
   "detectedObjects": [
@@ -172,18 +255,39 @@ Return ONLY a valid JSON object matching this schema (no markdown fences, no raw
   "recognizedFaces": []
 }`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
-      contents: {
-        parts: [imagePart, { text: promptText }],
-      },
-      config: {
-        responseMimeType: "application/json",
-        temperature: 0.2,
-      },
-    });
+    let response: any;
+    try {
+      response = await generateContentWithRetryAndFallback({
+        contents: {
+          parts: [imagePart, { text: promptText }],
+        },
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.2,
+        },
+      });
+    } catch (genError: any) {
+      console.warn("Vision model unavailable or overloaded after retries:", genError?.message);
+      const busySpeech = BUSY_MESSAGES[language] || BUSY_MESSAGES.en;
+      return res.json({
+        isSensitive: false,
+        isTemporaryUnavailable: true,
+        sceneSummary: "Vision service is momentarily busy. Retrying in next interval...",
+        speech: busySpeech,
+        answer: busySpeech,
+        detectedLanguage: language,
+        detectedObjects: [],
+        obstacles: [],
+        routeGuidance: "Path analysis temporarily pending.",
+        ocrText: null,
+        currency: { detected: false, notes: [], totalAmount: 0, currencySymbol: "₹", description: "None" },
+        medicine: { detected: false, warningDisclaimer: "" },
+        recognizedFaces: [],
+        timestamp: Date.now(),
+      });
+    }
 
-    const responseText = response.text || "{}";
+    const responseText = response?.text || "{}";
     let parsedData: any;
     try {
       // Clean possible wrapper if any
@@ -201,15 +305,20 @@ Return ONLY a valid JSON object matching this schema (no markdown fences, no raw
       };
     }
 
-    // Double check sensitive flag handling
+    // Double check sensitive/restricted image detection: respond ONLY "An error occurred."
     if (parsedData.isSensitive) {
       return res.json({
         isSensitive: true,
-        speech: "Error occurred. Unable to process this image.",
-        sceneSummary: "Processing restricted due to content safety.",
+        speech: "An error occurred.",
+        answer: "An error occurred.",
+        sceneSummary: "An error occurred.",
         detectedObjects: [],
         obstacles: [],
         routeGuidance: "",
+        ocrText: null,
+        currency: { detected: false, notes: [], totalAmount: 0, currencySymbol: "₹", description: "None" },
+        medicine: { detected: false, warningDisclaimer: "" },
+        recognizedFaces: [],
         timestamp: Date.now(),
       });
     }
@@ -218,9 +327,17 @@ Return ONLY a valid JSON object matching this schema (no markdown fences, no raw
     return res.json(parsedData);
   } catch (error: any) {
     console.error("Error in /api/analyze-frame:", error);
-    return res.status(500).json({
+    const targetLang = (req.body && req.body.language) || "en";
+    const fallbackMsg = BUSY_MESSAGES[targetLang] || BUSY_MESSAGES.en;
+    return res.json({
+      isSensitive: false,
+      isTemporaryUnavailable: true,
       error: error.message || "Failed to analyze frame",
-      speech: "An error occurred while analyzing the surroundings.",
+      speech: fallbackMsg,
+      sceneSummary: "Processing issue encountered. Retrying shortly.",
+      detectedObjects: [],
+      obstacles: [],
+      routeGuidance: "",
       timestamp: Date.now(),
     });
   }
@@ -236,22 +353,34 @@ app.post("/api/translate", async (req, res) => {
 
     const targetLangName = LANGUAGE_NAMES[targetLanguage] || targetLanguage;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.8-flash",
-      contents: `Translate the following text accurately into ${targetLangName}.
+    try {
+      const response = await generateContentWithRetryAndFallback({
+        contents: `Translate the following text accurately into ${targetLangName}.
 Preserve natural speaking tone for text-to-speech accessibility.
 Respond ONLY with the translated text without commentary or quotes.
 
 Source text: "${text}"`,
-    });
+      });
 
-    return res.json({
-      translatedText: response.text?.trim() || text,
-      targetLanguage,
-    });
+      return res.json({
+        translatedText: response?.text?.trim() || text,
+        targetLanguage,
+      });
+    } catch (err: any) {
+      console.warn("Translation fallback used due to high demand:", err?.message);
+      return res.json({
+        translatedText: text,
+        targetLanguage,
+        isFallback: true,
+      });
+    }
   } catch (err: any) {
     console.error("Translation error:", err);
-    return res.status(500).json({ error: err.message || "Translation failed" });
+    return res.json({
+      translatedText: req.body?.text || "",
+      targetLanguage: req.body?.targetLanguage || "en",
+      isFallback: true,
+    });
   }
 });
 

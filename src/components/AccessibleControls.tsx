@@ -197,7 +197,7 @@ export const AccessibleControls: React.FC<AccessibleControlsProps> = ({
               : 'Continuous vision surveillance is paused. Tap to enable periodic automatic checks.'
           }
         >
-          {autoLoopActive ? 'ACTIVE (Auto 3s)' : 'PAUSED'}
+          {autoLoopActive ? 'ACTIVE (Auto 6s)' : 'PAUSED'}
         </button>
       </div>
     </div>

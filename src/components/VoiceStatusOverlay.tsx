@@ -1,5 +1,5 @@
 import React from 'react';
-import { Mic, MicOff, Volume2, Globe, Sparkles } from 'lucide-react';
+import { Mic, MicOff, Volume2, Globe, Sparkles, Key, CheckCircle, AlertCircle, ShieldCheck } from 'lucide-react';
 import { SupportedLanguage, SUPPORTED_LANGUAGES } from '../types';
 
 interface VoiceStatusOverlayProps {
@@ -9,8 +9,12 @@ interface VoiceStatusOverlayProps {
   transcript: string;
   lastSpokenText: string;
   activeLanguage: SupportedLanguage;
+  wakeWordDetected: boolean;
+  isVoiceVerified: boolean;
+  voiceAuthStatusText: string;
   onLanguageChange: (lang: SupportedLanguage) => void;
   onToggleMic: () => void;
+  onEnrollVoice: () => void;
 }
 
 export const VoiceStatusOverlay: React.FC<VoiceStatusOverlayProps> = ({
@@ -20,8 +24,12 @@ export const VoiceStatusOverlay: React.FC<VoiceStatusOverlayProps> = ({
   transcript,
   lastSpokenText,
   activeLanguage,
+  wakeWordDetected,
+  isVoiceVerified,
+  voiceAuthStatusText,
   onLanguageChange,
   onToggleMic,
+  onEnrollVoice,
 }) => {
   const currentLangObj = SUPPORTED_LANGUAGES.find((l) => l.code === activeLanguage);
 
@@ -32,14 +40,16 @@ export const VoiceStatusOverlay: React.FC<VoiceStatusOverlayProps> = ({
       role="region"
       aria-label="Voice Assistant Status and Control"
     >
-      {/* Top Header: Assistant Mode & Language Switcher */}
+      {/* Top Header: Assistant Mode, Wake Word Indicator & Language Switcher */}
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2">
           {/* Status Dot */}
           <span
             className={`w-3 h-3 rounded-full transition-all ${
-              isSpeaking
+              wakeWordDetected
                 ? 'bg-amber-400 animate-ping'
+                : isSpeaking
+                ? 'bg-amber-300 animate-pulse'
                 : isListening
                 ? 'bg-emerald-400 animate-pulse'
                 : isAnalyzing
@@ -50,33 +60,59 @@ export const VoiceStatusOverlay: React.FC<VoiceStatusOverlayProps> = ({
           <span className="text-xs sm:text-sm font-bold uppercase tracking-wider text-neutral-200">
             {isSpeaking
               ? 'Assistant Speaking'
+              : wakeWordDetected
+              ? '“Aira” Detected • Voice Verifying...'
               : isListening
-              ? 'Listening for voice commands...'
+              ? 'Listening for “Aira” keyword...'
               : isAnalyzing
               ? 'Analyzing visual frame...'
               : 'Voice Assistant Ready'}
           </span>
         </div>
 
-        {/* Multilingual Selector */}
-        <div className="flex items-center gap-1.5 bg-neutral-950 px-2.5 py-1 rounded-xl border border-neutral-800">
-          <Globe className="w-3.5 h-3.5 text-neutral-400" />
-          <label htmlFor="language-select" className="sr-only">
-            Select Assistant Spoken Language
-          </label>
-          <select
-            id="language-select"
-            value={activeLanguage}
-            onChange={(e) => onLanguageChange(e.target.value as SupportedLanguage)}
-            className="bg-transparent text-xs font-semibold text-neutral-200 focus:outline-none cursor-pointer"
-            aria-label="Spoken Language for Voice Input and Output"
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Wake-Word & Voice-Auth Badges */}
+          <div
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-xl text-xs font-bold border transition-colors ${
+              wakeWordDetected
+                ? 'bg-amber-950 text-amber-300 border-amber-500 animate-pulse'
+                : 'bg-neutral-950 text-neutral-400 border-neutral-800'
+            }`}
+            title="Start your command with 'Aira' (e.g. 'Aira, what do you see?')"
           >
-            {SUPPORTED_LANGUAGES.map((lang) => (
-              <option key={lang.code} value={lang.code} className="bg-neutral-900 text-white">
-                {lang.nativeName} ({lang.name})
-              </option>
-            ))}
-          </select>
+            <Key className="w-3.5 h-3.5 text-amber-400" />
+            <span>Wake-Word: “Aira”</span>
+          </div>
+
+          <div
+            className="flex items-center gap-1 px-2 py-1 rounded-xl text-xs font-medium bg-neutral-950 text-neutral-300 border border-neutral-800 cursor-pointer hover:border-emerald-500"
+            onClick={onEnrollVoice}
+            title="Click to calibrate/enroll your voice signature"
+          >
+            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="text-[11px]">{voiceAuthStatusText || 'Voice Verified'}</span>
+          </div>
+
+          {/* Multilingual Selector */}
+          <div className="flex items-center gap-1.5 bg-neutral-950 px-2.5 py-1 rounded-xl border border-neutral-800">
+            <Globe className="w-3.5 h-3.5 text-neutral-400" />
+            <label htmlFor="language-select" className="sr-only">
+              Select Assistant Spoken Language
+            </label>
+            <select
+              id="language-select"
+              value={activeLanguage}
+              onChange={(e) => onLanguageChange(e.target.value as SupportedLanguage)}
+              className="bg-transparent text-xs font-semibold text-neutral-200 focus:outline-none cursor-pointer"
+              aria-label="Spoken Language for Voice Input and Output"
+            >
+              {SUPPORTED_LANGUAGES.map((lang) => (
+                <option key={lang.code} value={lang.code} className="bg-neutral-900 text-white">
+                  {lang.nativeName} ({lang.name})
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 
@@ -95,7 +131,7 @@ export const VoiceStatusOverlay: React.FC<VoiceStatusOverlayProps> = ({
             id="user-transcript-display"
             className="text-sm font-medium text-neutral-100 italic break-words line-clamp-2"
           >
-            {transcript ? `"${transcript}"` : 'Say "What do you see?", "Read text", "SOS"...'}
+            {transcript ? `"${transcript}"` : 'Say "Aira, what do you see?", "Aira, read text", "Aira, count money"...'}
           </p>
         </div>
 
@@ -117,7 +153,7 @@ export const VoiceStatusOverlay: React.FC<VoiceStatusOverlayProps> = ({
             aria-live="polite"
             className="text-sm font-semibold text-amber-200 break-words line-clamp-2"
           >
-            {lastSpokenText || 'Assistant will speak environmental updates and answers here.'}
+            {lastSpokenText || 'Assistant responds in the user’s language when “Aira” is spoken.'}
           </p>
         </div>
       </div>
@@ -135,19 +171,19 @@ export const VoiceStatusOverlay: React.FC<VoiceStatusOverlayProps> = ({
           }`}
           aria-label={
             isListening
-              ? 'Microphone is listening. Click to pause listening.'
-              : 'Microphone is paused. Click to speak a voice command.'
+              ? 'Microphone is active and listening for keyword Aira. Click to pause listening.'
+              : 'Microphone is paused. Click to enable listening for Aira.'
           }
         >
           {isListening ? (
             <>
               <Mic className="w-6 h-6 animate-pulse text-neutral-950" />
-              <span>Listening Active (Speak any command)</span>
+              <span>Listening Active (Say “Aira ...”)</span>
             </>
           ) : (
             <>
               <MicOff className="w-6 h-6 text-neutral-400" />
-              <span>Tap to Speak Voice Command</span>
+              <span>Tap to Enable Voice Listening (“Aira”)</span>
             </>
           )}
         </button>

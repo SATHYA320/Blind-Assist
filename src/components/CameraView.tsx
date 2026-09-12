@@ -75,6 +75,24 @@ export const CameraView: React.FC<CameraViewProps> = ({
         <div className="absolute inset-x-0 h-1 bg-gradient-to-r from-transparent via-cyan-400 to-transparent top-0 animate-[scan_2.5s_ease-in-out_infinite] shadow-[0_0_15px_rgba(34,211,238,0.8)] z-10 pointer-events-none" />
       )}
 
+      {/* Standby / Camera Alert notification banner if running on standby */}
+      {isCameraActive && cameraError && (
+        <div
+          id="camera-standby-banner"
+          className="absolute top-12 left-3 right-3 px-3 py-1.5 bg-neutral-900/90 border border-amber-500/80 rounded-xl text-amber-200 text-xs flex items-center justify-between z-30 shadow-lg"
+        >
+          <span className="truncate mr-2 font-medium">
+            ⚠️ Hardware camera in use elsewhere. Standby mode active.
+          </span>
+          <button
+            onClick={onRetryCamera}
+            className="px-2.5 py-1 bg-amber-400 hover:bg-amber-300 text-neutral-950 font-bold rounded-lg text-[11px] whitespace-nowrap transition-colors"
+          >
+            Retry Camera
+          </button>
+        </div>
+      )}
+
       {/* Top Overlay Badges: Low Light & Torch */}
       <div className="absolute top-3 left-3 right-3 flex items-center justify-between pointer-events-none z-20">
         <div className="flex items-center gap-2 flex-wrap">
